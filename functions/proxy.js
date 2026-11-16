@@ -67,11 +67,14 @@ function textResponse(status, message) {
 }
 
 /**
- * Builds a function that turns any URL found inside a document into a
- * /proxy?url=... address. Relative URLs are resolved against `baseUrl`
+ * Builds a function that turns any URL found inside a document into an
+ * ABSOLUTE /proxy?url=... address on the proxy host. Absolute URLs are
+ * immune to the injected <base href> (which must keep pointing at the
+ * target so that URLs generated at runtime fall back to the origin).
+ * Relative URLs are resolved against `baseUrl`
  * (the target page for HTML, the stylesheet itself for CSS).
  */
-function makeProxifier(baseUrl) {
+function makeProxifier(baseUrl, proxyOrigin) {
   return function proxify(rawUrl) {
     if (rawUrl == null) return rawUrl;
     const trimmed = String(rawUrl).trim();
@@ -91,7 +94,7 @@ function makeProxifier(baseUrl) {
     if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:') {
       return trimmed;
     }
-    return '/proxy?url=' + encodeURIComponent(absolute.href);
+    return proxyOrigin + '/proxy?url=' + encodeURIComponent(absolute.href);
   };
 }
 
@@ -241,11 +244,12 @@ export async function onRequest(context) {
     });
 
     const contentType = upstream.headers.get('content-type') || '';
+    const proxyOrigin = new URL(request.url).origin;
 
     // 4a. HTML: rewrite URLs so every asset is fetched through the proxy.
     if (/text\/html/i.test(contentType)) {
       const html = await upstream.text();
-      const rewritten = rewriteHtml(html, makeProxifier(target), target);
+      const rewritten = rewriteHtml(html, makeProxifier(target, proxyOrigin), target);
       const responseHeaders = sanitizeHeaders(upstream.headers);
       responseHeaders.set('content-type', 'text/html; charset=UTF-8');
       responseHeaders.set('cache-control', 'no-store');
@@ -259,7 +263,7 @@ export async function onRequest(context) {
     // 4b. CSS: relative url()s resolve against the stylesheet's own address.
     if (/text\/css/i.test(contentType)) {
       const css = await upstream.text();
-      const rewritten = rewriteCss(css, makeProxifier(target));
+      const rewritten = rewriteCss(css, makeProxifier(target, proxyOrigin));
       const responseHeaders = sanitizeHeaders(upstream.headers);
       responseHeaders.set('content-type', 'text/css; charset=UTF-8');
       return new Response(rewritten, {

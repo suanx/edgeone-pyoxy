@@ -2,12 +2,15 @@
  * EdgeOne Pages universal reverse proxy function.
  * Route: /proxy?url=<target-url>
  *
- * Fix: the previous version forwarded every request through
- * https://cors-anywhere.herokuapp.com/ — that public demo service is
- * effectively dead (it requires manual opt-in via /corsdemo and hard
- * rate-limits), which made every proxied request fail. We now fetch the
- * target URL directly from the edge function, forwarding the original
- * request method/headers/body and returning a sanitized response.
+ * v2 changes (页面错乱修复):
+ * A naive reverse proxy returns the target page's HTML untouched, so every
+ * relative/absolute asset URL inside it (css/js/img) then resolves against
+ * the PROXY domain where those paths do not exist -> stylesheets and scripts
+ * 404 and the page renders unstyled/broken. We now rewrite URLs found in
+ * HTML documents and CSS files so they are fetched back through /proxy,
+ * strip subresource integrity hashes (they no longer match once URLs change),
+ * remove original <base> tags and inject our own pointing at the target so
+ * that URLs generated at runtime fall back to the origin instead of 404ing.
  */
 
 // Hop-by-hop headers plus headers injected by the CDN/platform that must
@@ -40,7 +43,7 @@ const REQUEST_HEADER_DENYLIST = new Set([
 const RESPONSE_HEADER_DENYLIST = new Set([
   'set-cookie',
   'content-encoding', // the runtime already decompressed the body
-  'content-length', // recomputed for the streamed body
+  'content-length', // recomputed for the (possibly rewritten) body
   'content-security-policy',
   'content-security-policy-report-only',
   'x-frame-options',
@@ -61,6 +64,117 @@ function textResponse(status, message) {
       'access-control-allow-origin': '*',
     },
   });
+}
+
+/**
+ * Builds a function that turns any URL found inside a document into a
+ * /proxy?url=... address. Relative URLs are resolved against `baseUrl`
+ * (the target page for HTML, the stylesheet itself for CSS).
+ */
+function makeProxifier(baseUrl) {
+  return function proxify(rawUrl) {
+    if (rawUrl == null) return rawUrl;
+    const trimmed = String(rawUrl).trim();
+    if (!trimmed) return trimmed;
+    if (/^(data:|javascript:|mailto:|tel:|sms:|about:|blob:|#)/i.test(trimmed)) {
+      return trimmed;
+    }
+    let absolute;
+    try {
+      absolute = new URL(
+        trimmed.startsWith('//') ? 'https:' + trimmed : trimmed,
+        baseUrl
+      );
+    } catch (error) {
+      return trimmed;
+    }
+    if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:') {
+      return trimmed;
+    }
+    return '/proxy?url=' + encodeURIComponent(absolute.href);
+  };
+}
+
+/** Rewrites url() / @import references inside CSS text. */
+function rewriteCss(cssText, proxify) {
+  cssText = cssText.replace(
+    /@import\s+(?:url\(\s*)?(['"]?)([^'";)]+)\1\s*\)?/gi,
+    (match, quote, url) => {
+      const trimmed = url.trim();
+      if (/^(data:|about:|blob:)/i.test(trimmed)) return match;
+      return match.replace(url, proxify(trimmed));
+    }
+  );
+  cssText = cssText.replace(/url\(\s*(['"]?)([^'")]+?)\1\s*\)/gi, (match, quote, url) => {
+    const trimmed = url.trim();
+    if (/^(data:|about:|blob:)/i.test(trimmed)) return match;
+    return 'url("' + proxify(trimmed) + '")';
+  });
+  return cssText;
+}
+
+/** Rewrites every URL-bearing attribute / style block inside an HTML document. */
+function rewriteHtml(html, proxify, targetUrl) {
+  // Subresource integrity hashes no longer match once URLs change.
+  html = html.replace(/\sintegrity\s*=\s*(?:"[^"]*"|'[^']*')/gi, '');
+  // Only the first <base> is honoured; drop the original one, inject ours below.
+  html = html.replace(/<base[^>]*>/gi, '');
+
+  // Responsive images: srcset holds a comma separated list of "url descriptor".
+  html = html.replace(/\ssrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (match, dq, sq) => {
+    const value = dq !== undefined ? dq : sq;
+    const rewritten = value
+      .split(',')
+      .map((candidate) => {
+        const parts = candidate.trim().split(/\s+/);
+        if (parts[0]) parts[0] = proxify(parts[0]);
+        return parts.join(' ');
+      })
+      .join(', ');
+    return ' srcset="' + rewritten.replace(/"/g, '&quot;') + '"';
+  });
+
+  // Plain URL attributes.
+  html = html.replace(
+    /\s(href|src|action|poster|formaction|data-src|data-href|data-url|data-original|data-background|data-background-image)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
+    (match, attr, dq, sq) => {
+      const value = dq !== undefined ? dq : sq;
+      return ' ' + attr + '="' + proxify(value).replace(/"/g, '&quot;') + '"';
+    }
+  );
+
+  // <style> blocks: url() references resolve against the page URL.
+  html = html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, (match, attrs, css) => {
+    return '<style' + attrs + '>' + rewriteCss(css, proxify) + '</style>';
+  });
+
+  // Inline style attributes may contain url(...) too.
+  html = html.replace(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (match, dq, sq) => {
+    const value = dq !== undefined ? dq : sq;
+    return ' style="' + rewriteCss(value, proxify).replace(/"/g, '&quot;') + '"';
+  });
+
+  // Safety net: any URL we could not rewrite statically (typically generated
+  // by page JavaScript) resolves against the target origin instead of 404ing
+  // on the proxy domain.
+  const baseTag = '<base href="' + targetUrl.href + '">';
+  if (/<head[^>]*>/i.test(html)) {
+    html = html.replace(/<head([^>]*)>/i, (m) => m + baseTag);
+  } else {
+    html = baseTag + html;
+  }
+  return html;
+}
+
+function sanitizeHeaders(source) {
+  const headers = new Headers();
+  for (const [name, value] of source.entries()) {
+    if (!RESPONSE_HEADER_DENYLIST.has(name.toLowerCase())) {
+      headers.set(name, value);
+    }
+  }
+  headers.set('access-control-allow-origin', '*');
+  return headers;
 }
 
 export async function onRequest(context) {
@@ -126,19 +240,40 @@ export async function onRequest(context) {
       redirect: 'follow',
     });
 
-    // 4. Sanitize the upstream response headers before returning them.
-    const responseHeaders = new Headers();
-    for (const [name, value] of upstream.headers.entries()) {
-      if (!RESPONSE_HEADER_DENYLIST.has(name.toLowerCase())) {
-        responseHeaders.set(name, value);
-      }
-    }
-    responseHeaders.set('access-control-allow-origin', '*');
+    const contentType = upstream.headers.get('content-type') || '';
 
+    // 4a. HTML: rewrite URLs so every asset is fetched through the proxy.
+    if (/text\/html/i.test(contentType)) {
+      const html = await upstream.text();
+      const rewritten = rewriteHtml(html, makeProxifier(target), target);
+      const responseHeaders = sanitizeHeaders(upstream.headers);
+      responseHeaders.set('content-type', 'text/html; charset=UTF-8');
+      responseHeaders.set('cache-control', 'no-store');
+      return new Response(rewritten, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: responseHeaders,
+      });
+    }
+
+    // 4b. CSS: relative url()s resolve against the stylesheet's own address.
+    if (/text\/css/i.test(contentType)) {
+      const css = await upstream.text();
+      const rewritten = rewriteCss(css, makeProxifier(target));
+      const responseHeaders = sanitizeHeaders(upstream.headers);
+      responseHeaders.set('content-type', 'text/css; charset=UTF-8');
+      return new Response(rewritten, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: responseHeaders,
+      });
+    }
+
+    // 4c. Everything else: stream through untouched.
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: responseHeaders,
+      headers: sanitizeHeaders(upstream.headers),
     });
   } catch (error) {
     return textResponse(502, `Proxy Error: unable to reach ${target.href} — ${error.message}`);

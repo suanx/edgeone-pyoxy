@@ -1,0 +1,9 @@
+{
+  "name": "edgeone-pyoxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Universal reverse proxy deployed on Tencent Cloud EdgeOne Pages (static site + edge function)",
+  "scripts": {
+    "build": "echo 'Static project: no build step required.'"
+  }
+}

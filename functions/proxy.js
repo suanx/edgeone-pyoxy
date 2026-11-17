@@ -15,6 +15,8 @@
 
 // Hop-by-hop headers plus headers injected by the CDN/platform that must
 // never be forwarded to the target site.
+// NOTE: Authorization and Cookie are intentionally FORWARDED — apps calling
+// authenticated APIs through the proxy need them to reach the target.
 const REQUEST_HEADER_DENYLIST = new Set([
   'host',
   'connection',
@@ -25,8 +27,6 @@ const REQUEST_HEADER_DENYLIST = new Set([
   'trailer',
   'transfer-encoding',
   'upgrade',
-  'cookie',
-  'authorization',
   'accept-encoding', // let the runtime negotiate and decompress encoding itself
   // CDN / proxy injected headers
   'x-forwarded-for',

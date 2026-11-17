@@ -52,13 +52,50 @@ const RESPONSE_HEADER_DENYLIST = new Set([
   'clear-site-data',
 ]);
 
-// Injected into proxied pages as a safety net for GET forms: a GET submission
-// replaces the action URL's ENTIRE query string, which would drop the
-// mandatory ?url= parameter. Sites like Google bypass the submit event
-// entirely (keydown handlers / form.submit()), so we cover all three paths.
-// Only GET forms whose action points back at the proxy are touched.
-const FORM_FIX_SCRIPT = `<script>
+// Injected into proxied pages:
+// 1. GET form submissions replace the action URL's ENTIRE query string, which
+//    would drop the mandatory ?url= parameter — merge fields instead. Sites
+//    like Google bypass the submit event (keydown / form.submit()), so all
+//    three paths are covered.
+// 2. fetch() and XMLHttpRequest with SAME-ORIGIN relative URLs are rewritten
+//    to /proxy/<encoded-target> so that scripts of the proxied site (which
+//    build URLs like /search?... or /xjs/...) keep working through the proxy.
+function buildInjectedScript(targetUrl) {
+  const targetJson = JSON.stringify(targetUrl.href);
+  return `<script>
 (function () {
+  var TARGET = ${targetJson};
+  var ORIGIN = location.origin;
+
+  function toProxied(url) {
+    try {
+      var u = new URL(url, location.href);
+      if (u.origin !== ORIGIN) return url;
+      if (u.pathname === '/proxy' || u.pathname.indexOf('/proxy/') === 0) return url;
+      var t = new URL(u.pathname + u.search + u.hash, TARGET);
+      return ORIGIN + '/proxy/' + encodeURIComponent(t.href);
+    } catch (err) { return url; }
+  }
+
+  if (window.fetch) {
+    var nativeFetch = window.fetch;
+    window.fetch = function (input, init) {
+      try {
+        if (typeof input === 'string') input = toProxied(input);
+        else if (input && typeof input.url === 'string') input = toProxied(input.url);
+      } catch (err) {}
+      return nativeFetch.call(this, input, init);
+    };
+  }
+  if (window.XMLHttpRequest && XMLHttpRequest.prototype.open) {
+    var nativeOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      try { url = toProxied(String(url)); } catch (err) {}
+      var rest = [].slice.call(arguments, 2);
+      return nativeOpen.apply(this, [method, url].concat(rest));
+    };
+  }
+
   function resolvedAction(form) {
     var action = form.getAttribute('action');
     if (!action) return null;
@@ -69,7 +106,7 @@ const FORM_FIX_SCRIPT = `<script>
     var method = (form.getAttribute('method') || 'get').toLowerCase();
     if (method !== 'get') return false;
     var url = resolvedAction(form);
-    return !!(url && /\/proxy($|[/?#])/.test(url.href));
+    return !!(url && /\\/proxy($|[/?#])/.test(url.href));
   }
   function mergedUrl(form) {
     var target = resolvedAction(form);
@@ -110,6 +147,7 @@ const FORM_FIX_SCRIPT = `<script>
   }
 })();
 </script>`;
+}
 
 function textResponse(status, message) {
   return new Response(message, {
@@ -217,10 +255,11 @@ function rewriteHtml(html, proxify, targetUrl) {
   // by page JavaScript) resolves against the target origin instead of 404ing
   // on the proxy domain.
   const baseTag = '<base href="' + targetUrl.href + '">';
+  const injected = buildInjectedScript(targetUrl);
   if (/<head[^>]*>/i.test(html)) {
-    html = html.replace(/<head([^>]*)>/i, (m) => m + baseTag + FORM_FIX_SCRIPT);
+    html = html.replace(/<head([^>]*)>/i, (m) => m + baseTag + injected);
   } else {
-    html = baseTag + FORM_FIX_SCRIPT + html;
+    html = baseTag + injected + html;
   }
   return html;
 }

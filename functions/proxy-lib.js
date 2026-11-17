@@ -66,14 +66,24 @@ function buildInjectedScript(targetUrl) {
 (function () {
   var TARGET = ${targetJson};
   var ORIGIN = location.origin;
+  var TARGET_ORIGIN = new URL(TARGET).origin;
 
   function toProxied(url) {
     try {
       var u = new URL(url, location.href);
-      if (u.origin !== ORIGIN) return url;
-      if (u.pathname === '/proxy' || u.pathname.indexOf('/proxy/') === 0) return url;
-      var t = new URL(u.pathname + u.search + u.hash, TARGET);
-      return ORIGIN + '/proxy/' + encodeURIComponent(t.href);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return url;
+      if (u.origin === ORIGIN) {
+        if (u.pathname === '/proxy' || u.pathname.indexOf('/proxy/') === 0) return url;
+        var t = new URL(u.pathname + u.search + u.hash, TARGET);
+        return ORIGIN + '/proxy/' + encodeURIComponent(t.href);
+      }
+      // Absolute URLs pointing at the target origin (sites often hardcode an
+      // apiBaseUrl like "https://target.example" in their JS) must also go
+      // through the proxy, otherwise the site's own scripts bypass it.
+      if (u.origin === TARGET_ORIGIN) {
+        return ORIGIN + '/proxy/' + encodeURIComponent(u.href);
+      }
+      return url;
     } catch (err) { return url; }
   }
 
@@ -231,14 +241,40 @@ function rewriteHtml(html, proxify, targetUrl) {
     return ' srcset="' + rewritten.replace(/"/g, '&quot;') + '"';
   });
 
-  // Plain URL attributes.
+  // Plain URL attributes (including Astro island hydration URLs, which the
+  // runtime resolves via dynamic import against the document base).
   html = html.replace(
-    /\s(href|src|action|poster|formaction|data-src|data-href|data-url|data-original|data-background|data-background-image)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
+    /\s(href|src|action|poster|formaction|data-src|data-href|data-url|data-original|data-background|data-background-image|component-url|renderer-url|before-hydration-url)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
     (match, attr, dq, sq) => {
       const value = dq !== undefined ? dq : sq;
       return ' ' + attr + '="' + proxify(value).replace(/"/g, '&quot;') + '"';
     }
   );
+
+  // Frameworks (Astro islands, etc.) embed configuration JSON in a `props`
+  // attribute. Swap the target origin inside that JSON for the proxied
+  // prefix, so hardcoded values such as apiBaseUrl = "https://target.example"
+  // keep API calls AND post-login `location.href` navigations inside the
+  // proxy instead of escaping to the original site.
+  const proxiedOrigin = proxify(targetUrl.origin);
+  if (html.indexOf(targetUrl.origin) !== -1) {
+    html = html.replace(/\sprops\s*=\s*"([^"]*)"/gi, (match, value) => {
+      let json = value
+        .replace(/&quot;/g, '"')
+        .replace(/&#x27;/gi, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+      if (json.indexOf(targetUrl.origin) === -1) return match;
+      json = json.split(targetUrl.origin).join(proxiedOrigin);
+      const escaped = json
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return ' props="' + escaped + '"';
+    });
+  }
 
   // <style> blocks: url() references resolve against the page URL.
   html = html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, (match, attrs, css) => {

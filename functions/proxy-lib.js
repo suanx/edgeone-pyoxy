@@ -52,28 +52,62 @@ const RESPONSE_HEADER_DENYLIST = new Set([
   'clear-site-data',
 ]);
 
-// Injected into proxied pages as an extra safety net for GET forms.
+// Injected into proxied pages as a safety net for GET forms: a GET submission
+// replaces the action URL's ENTIRE query string, which would drop the
+// mandatory ?url= parameter. Sites like Google bypass the submit event
+// entirely (keydown handlers / form.submit()), so we cover all three paths.
+// Only GET forms whose action points back at the proxy are touched.
 const FORM_FIX_SCRIPT = `<script>
 (function () {
-  document.addEventListener('submit', function (e) {
-    var form = e.target;
-    if (!form || form.tagName !== 'FORM') return;
+  function resolvedAction(form) {
+    var action = form.getAttribute('action');
+    if (!action) return null;
+    try { return new URL(action, document.baseURI); } catch (e) { return null; }
+  }
+  function isProxiedGetForm(form) {
+    if (!form) return false;
     var method = (form.getAttribute('method') || 'get').toLowerCase();
-    if (method !== 'get') return; // POST keeps the query string intact
-    e.preventDefault();
+    if (method !== 'get') return false;
+    var url = resolvedAction(form);
+    return !!(url && url.href.indexOf('/proxy?') !== -1);
+  }
+  function mergedUrl(form) {
+    var target = resolvedAction(form);
+    if (!target) return null;
+    var params = new URLSearchParams(target.search);
     try {
-      var action = form.getAttribute('action') || location.href;
-      var target = new URL(action, document.baseURI);
-      var params = new URLSearchParams(target.search);
-      new FormData(form).forEach(function (value, key) {
-        params.append(key, value);
-      });
-      target.search = params.toString();
-      location.href = target.toString();
-    } catch (err) {
-      form.submit();
+      new FormData(form).forEach(function (value, key) { params.append(key, value); });
+    } catch (err) {}
+    target.search = params.toString();
+    return target.toString();
+  }
+  function goTo(e, form) {
+    e.preventDefault();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    e.stopPropagation();
+    var url = mergedUrl(form);
+    if (url) location.href = url;
+  }
+  document.addEventListener('submit', function (e) {
+    if (e.target && e.target.tagName === 'FORM' && isProxiedGetForm(e.target)) {
+      goTo(e, e.target);
     }
   }, true);
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' || !e.target || !e.target.closest) return;
+    var form = e.target.closest('form');
+    if (form && isProxiedGetForm(form)) goTo(e, form);
+  }, true);
+  if (window.HTMLFormElement && HTMLFormElement.prototype.submit) {
+    var nativeSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function () {
+      if (isProxiedGetForm(this)) {
+        var url = mergedUrl(this);
+        if (url) { location.href = url; return; }
+      }
+      return nativeSubmit.apply(this, arguments);
+    };
+  }
 })();
 </script>`;
 

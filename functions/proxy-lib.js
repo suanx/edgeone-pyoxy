@@ -241,10 +241,14 @@ function rewriteHtml(html, proxify, targetUrl) {
     return ' srcset="' + rewritten.replace(/"/g, '&quot;') + '"';
   });
 
-  // Plain URL attributes (including Astro island hydration URLs, which the
-  // runtime resolves via dynamic import against the document base).
+  // Plain URL attributes.
+  // NOTE: deliberately NOT rewriting astro-island component-url/renderer-url:
+  // those modules use RELATIVE import specifiers, which would resolve against
+  // the proxy URL and lose the target (verified: proxied dynamic import fails,
+  // direct origin import works). They resolve against the <base> tag instead,
+  // exactly like before — hydration keeps working.
   html = html.replace(
-    /\s(href|src|action|poster|formaction|data-src|data-href|data-url|data-original|data-background|data-background-image|component-url|renderer-url|before-hydration-url)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
+    /\s(href|src|action|poster|formaction|data-src|data-href|data-url|data-original|data-background|data-background-image)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
     (match, attr, dq, sq) => {
       const value = dq !== undefined ? dq : sq;
       return ' ' + attr + '="' + proxify(value).replace(/"/g, '&quot;') + '"';

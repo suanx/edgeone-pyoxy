@@ -56,6 +56,33 @@ const RESPONSE_HEADER_DENYLIST = new Set([
   'clear-site-data',
 ]);
 
+// Injected into proxied pages: a GET form submission replaces the action
+// URL's entire query string, which would drop the mandatory ?url= parameter.
+// This listener merges the form fields into the existing query instead.
+const FORM_FIX_SCRIPT = `<script>
+(function () {
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || form.tagName !== 'FORM') return;
+    var method = (form.getAttribute('method') || 'get').toLowerCase();
+    if (method !== 'get') return; // POST keeps the query string intact
+    e.preventDefault();
+    try {
+      var action = form.getAttribute('action') || location.href;
+      var target = new URL(action, document.baseURI);
+      var params = new URLSearchParams(target.search);
+      new FormData(form).forEach(function (value, key) {
+        params.append(key, value);
+      });
+      target.search = params.toString();
+      location.href = target.toString();
+    } catch (err) {
+      form.submit();
+    }
+  }, true);
+})();
+</script>`;
+
 function textResponse(status, message) {
   return new Response(message, {
     status,
@@ -162,9 +189,9 @@ function rewriteHtml(html, proxify, targetUrl) {
   // on the proxy domain.
   const baseTag = '<base href="' + targetUrl.href + '">';
   if (/<head[^>]*>/i.test(html)) {
-    html = html.replace(/<head([^>]*)>/i, (m) => m + baseTag);
+    html = html.replace(/<head([^>]*)>/i, (m) => m + baseTag + FORM_FIX_SCRIPT);
   } else {
-    html = baseTag + html;
+    html = baseTag + FORM_FIX_SCRIPT + html;
   }
   return html;
 }
@@ -208,6 +235,11 @@ export async function onRequest(context) {
     target = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
     if (target.protocol !== 'http:' && target.protocol !== 'https:') {
       return textResponse(400, `Unsupported protocol '${target.protocol}' — only http and https are allowed.`);
+    }
+    // Preserve any extra query parameters (e.g. ?q=... appended by search
+    // forms or API clients) and merge them into the target URL.
+    for (const [key, value] of requestUrl.searchParams) {
+      if (key !== 'url') target.searchParams.append(key, value);
     }
   } catch (error) {
     return textResponse(400, `Invalid target URL: ${error.message}`);

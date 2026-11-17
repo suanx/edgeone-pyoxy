@@ -303,7 +303,7 @@ export async function handle(request, rawTarget) {
       if (key !== 'url') target.searchParams.append(key, value);
     });
   } catch (error) {
-    return textResponse(400, `Invalid target URL: ${error.message}`);
+    return textResponse(400, `Invalid target URL: ${error.message} [raw=${JSON.stringify(rawTarget)}]`);
   }
 
   // 2. Forward the original request headers, minus hop-by-hop/platform ones.

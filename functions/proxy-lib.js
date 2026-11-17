@@ -283,9 +283,13 @@ export async function handle(request, rawTarget) {
     if (!rawTarget) {
       return textResponse(400, "Missing target. Usage: /proxy?url=https://example.com");
     }
-    const candidate = rawTarget.startsWith('/proxy/')
-      ? normalizeTargetFromPath(rawTarget.slice('/proxy/'.length))
-      : rawTarget;
+    // The platform percent-decodes the path before routing, so a path-style
+    // target often arrives with the "//" after the scheme collapsed to "/"
+    // (e.g. "https:/www.google.com"); normalize both encoded and collapsed
+    // forms before validation.
+    const candidate = normalizeTargetFromPath(
+      rawTarget.startsWith('/proxy/') ? rawTarget.slice('/proxy/'.length) : rawTarget
+    );
     // Be forgiving: accept "example.com" as well as "https://example.com".
     target = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate) ? candidate : `https://${candidate}`);
     if (target.protocol !== 'http:' && target.protocol !== 'https:') {

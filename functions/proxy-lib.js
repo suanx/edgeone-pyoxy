@@ -36,8 +36,10 @@ const REQUEST_HEADER_DENYLIST = new Set([
 ]);
 
 // Response headers that break rendering or leak state when proxied.
+// NOTE: set-cookie is intentionally FORWARDED (see sanitizeHeaders) so that
+// upstream sessions persist in the browser — e.g. Google's captcha clearance
+// cookie, without which every search would re-trigger the captcha.
 const RESPONSE_HEADER_DENYLIST = new Set([
-  'set-cookie',
   'content-encoding', // the runtime already decompressed the body
   'content-length', // recomputed for the (possibly rewritten) body
   'content-security-policy',
@@ -309,9 +311,26 @@ function rewriteHtml(html, proxify, targetUrl) {
 function sanitizeHeaders(source) {
   const headers = new Headers();
   for (const [name, value] of source.entries()) {
-    if (!RESPONSE_HEADER_DENYLIST.has(name.toLowerCase())) {
+    const lower = name.toLowerCase();
+    // set-cookie is re-added below from getSetCookie() so that multiple
+    // cookies survive (entries() would join them with ", " and corrupt them).
+    if (lower !== 'set-cookie' && !RESPONSE_HEADER_DENYLIST.has(lower)) {
       headers.set(name, value);
     }
+  }
+  // Forward set-cookie (individually, so multiple cookies survive). The
+  // browser stores them for the proxy domain and sends them back on the next
+  // request, keeping upstream sessions/clearances alive through the proxy.
+  let cookies = [];
+  try {
+    if (typeof source.getSetCookie === 'function') cookies = source.getSetCookie();
+  } catch (error) { /* older runtimes: fall back to the joined value */ }
+  if (!cookies.length) {
+    const joined = source.get('set-cookie');
+    if (joined) cookies = [joined];
+  }
+  for (const cookie of cookies) {
+    headers.append('set-cookie', cookie);
   }
   headers.set('access-control-allow-origin', '*');
   return headers;

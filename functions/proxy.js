@@ -238,9 +238,11 @@ export async function onRequest(context) {
     }
     // Preserve any extra query parameters (e.g. ?q=... appended by search
     // forms or API clients) and merge them into the target URL.
-    for (const [key, value] of requestUrl.searchParams) {
+    // NOTE: forEach instead of for...of — URLSearchParams has no iterator in
+    // the EdgeOne function runtime.
+    requestUrl.searchParams.forEach((value, key) => {
       if (key !== 'url') target.searchParams.append(key, value);
-    }
+    });
   } catch (error) {
     return textResponse(400, `Invalid target URL: ${error.message}`);
   }

@@ -375,11 +375,29 @@ export async function handle(request, rawTarget, viaQuery) {
     // target often arrives with the "//" after the scheme collapsed to "/"
     // (e.g. "https:/www.google.com"); normalize both encoded and collapsed
     // forms before validation.
-    const candidate = normalizeTargetFromPath(
+    let candidate = normalizeTargetFromPath(
       rawTarget.startsWith('/proxy/') ? rawTarget.slice('/proxy/'.length) : rawTarget
     );
+    // A module served through the proxy resolves its own relative imports
+    // against the proxy URL, which drops the target ("./ui.chunk.js" becomes
+    // /proxy/ui.chunk.js). When the remaining path is not an absolute URL,
+    // recover the intended base from the Referer — for same-origin requests
+    // it is the full proxied module/page URL — and resolve against it.
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
+      let recovered = false;
+      const referer = request.headers.get('referer') || '';
+      const seg = referer.match(/\/proxy\/([^/?#]+)/);
+      if (seg) {
+        try {
+          const refBase = new URL(normalizeTargetFromPath(decodeURIComponent(seg[1])));
+          candidate = new URL(candidate, refBase).href;
+          recovered = true;
+        } catch (error) { /* fall back to the bare-host default below */ }
+      }
+      if (!recovered) candidate = `https://${candidate}`;
+    }
     // Be forgiving: accept "example.com" as well as "https://example.com".
-    target = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate) ? candidate : `https://${candidate}`);
+    target = new URL(candidate);
     if (target.protocol !== 'http:' && target.protocol !== 'https:') {
       return textResponse(400, `Unsupported protocol '${target.protocol}' — only http and https are allowed.`);
     }

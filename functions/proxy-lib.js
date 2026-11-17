@@ -262,9 +262,14 @@ function normalizeTargetFromPath(raw) {
 
 /**
  * Main entry: `rawTarget` is the target URL taken either from the ?url=
- * query parameter or from the /proxy/<encoded> path segment.
+ * query parameter (viaQuery=true) or from the /proxy/<encoded> path segment.
+ *
+ * HTML pages entered via the query style are 302-redirected to the path
+ * style so the target lives in the URL PATH. Sites whose JavaScript rebuilds
+ * the current URL's query string (Google search, for example) then cannot
+ * lose the target anymore.
  */
-export async function handle(request, rawTarget) {
+export async function handle(request, rawTarget, viaQuery) {
   // Support using the proxy from browser JavaScript as well.
   if (request.method === 'OPTIONS') {
     return new Response(null, {
@@ -341,7 +346,19 @@ export async function handle(request, rawTarget) {
     const contentType = upstream.headers.get('content-type') || '';
     const proxyOrigin = new URL(request.url).origin;
 
-    // 4a. HTML: rewrite URLs so every asset is fetched through the proxy.
+    // 4a. HTML entered via /proxy?url=...: redirect to the path style so the
+    // target stays in the path even when page scripts rebuild the query.
+    if (/text\/html/i.test(contentType) && viaQuery && request.method === 'GET') {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: proxyOrigin + '/proxy/' + encodeURIComponent(target.href),
+          'cache-control': 'no-store',
+        },
+      });
+    }
+
+    // 4b. HTML: rewrite URLs so every asset is fetched through the proxy.
     if (/text\/html/i.test(contentType)) {
       const html = await upstream.text();
       const rewritten = rewriteHtml(html, makeProxifier(target, proxyOrigin), target);
@@ -355,7 +372,7 @@ export async function handle(request, rawTarget) {
       });
     }
 
-    // 4b. CSS: relative url()s resolve against the stylesheet's own address.
+    // 4c. CSS: relative url()s resolve against the stylesheet's own address.
     if (/text\/css/i.test(contentType)) {
       const css = await upstream.text();
       const rewritten = rewriteCss(css, makeProxifier(target, proxyOrigin));
@@ -368,7 +385,7 @@ export async function handle(request, rawTarget) {
       });
     }
 
-    // 4c. Everything else: stream through untouched.
+    // 4d. Everything else: stream through untouched.
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,

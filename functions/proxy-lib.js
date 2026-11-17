@@ -69,7 +69,7 @@ const FORM_FIX_SCRIPT = `<script>
     var method = (form.getAttribute('method') || 'get').toLowerCase();
     if (method !== 'get') return false;
     var url = resolvedAction(form);
-    return !!(url && url.href.indexOf('/proxy?') !== -1);
+    return !!(url && /\/proxy($|[/?#])/.test(url.href));
   }
   function mergedUrl(form) {
     var target = resolvedAction(form);
@@ -148,6 +148,8 @@ function makeProxifier(baseUrl, proxyOrigin) {
     if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:') {
       return trimmed;
     }
+    // Path style: /proxy/<percent-encoded-target>. The target survives GET
+    // form submissions and page scripts that rebuild the query string.
     return proxyOrigin + '/proxy/' + encodeURIComponent(absolute.href);
   };
 }
@@ -303,7 +305,7 @@ export async function handle(request, rawTarget) {
       if (key !== 'url') target.searchParams.append(key, value);
     });
   } catch (error) {
-    return textResponse(400, `Invalid target URL: ${error.message} [raw=${JSON.stringify(rawTarget)}]`);
+    return textResponse(400, `Invalid target URL: ${error.message}`);
   }
 
   // 2. Forward the original request headers, minus hop-by-hop/platform ones.

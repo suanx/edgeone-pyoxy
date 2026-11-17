@@ -256,7 +256,9 @@ function rewriteHtml(html, proxify, targetUrl) {
   // prefix, so hardcoded values such as apiBaseUrl = "https://target.example"
   // keep API calls AND post-login `location.href` navigations inside the
   // proxy instead of escaping to the original site.
-  const proxiedOrigin = proxify(targetUrl.origin);
+  // NOTE: strip the trailing %2F — new URL() normalizes the bare origin to
+  // "origin/", and the site concatenates paths like apiBaseUrl + "/login".
+  const proxiedOrigin = proxify(targetUrl.origin).replace(/%2F$/i, '');
   if (html.indexOf(targetUrl.origin) !== -1) {
     html = html.replace(/\sprops\s*=\s*"([^"]*)"/gi, (match, value) => {
       let json = value
